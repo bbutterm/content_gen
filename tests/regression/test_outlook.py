@@ -18,7 +18,7 @@ TAGS = '#Сервис #Тестирование #Технологии'
 CONSEQUENCE = 'Если пилот подтвердит результаты, в ближайшие недели возможно расширение тестирования.'
 ASSUMPTION = 'Условие — успешное завершение пилота.'
 UNCERTAINTY = 'Сроки не подтверждены; результат может измениться.'
-FALLBACK = ('Редакционный сценарий: на ближайшие дни/недели это может повлиять на обсуждение новости. '
+GENERIC_ECHO = ('Редакционный сценарий: на ближайшие дни/недели это может повлиять на обсуждение новости. '
             'При новых подтверждённых деталях оценку следует пересмотреть; последствия пока неизвестны.')
 
 
@@ -97,11 +97,143 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[0]['response_format'], {'type': 'json_object'})
 
 
-    async def test_missing_outlook_is_honest_fallback_without_another_request(self):
+    async def test_missing_outlook_keeps_only_facts_and_tags_without_another_request(self):
         self.content = json.dumps({'proposals': [{'title': 'Обновление сервиса', 'text': FACTS + '\n\n' + TAGS, 'sources': [1]}]})
         result = await self.generate()
-        self.assertEqual(result['text'], FACTS + '\n\n🤖 **ИИ-прогноз**\n' + FALLBACK + '\n\n' + TAGS)
+        self.assertEqual(result['text'], FACTS + '\n\n' + TAGS)
+        public = render_post(result['text'], emoji=False)
+        self.assertNotIn('ИИ-прогноз', public.plain)
+        self.assertNotIn('Редакционный сценарий', public.html())
+        self.assertTrue(public.plain.endswith(TAGS))
 
+
+    async def test_provider_generic_editorial_echo_is_omitted_in_all_news_paths(self):
+        echoes = (GENERIC_ECHO, 'Это может повлиять на обсуждение новости.',
+                  'ЭТО МОЖЕТ  ПОВЛИЯТЬ НА ОБСУЖДЕНИЕ ЭТОЙ НОВОСТИ!')
+        old = FACTS + '\n\n**ИИ-прогноз**\n' + GENERIC_ECHO + '\n\n' + TAGS
+        for enabled in ('1', '0'):
+            self.db.set('news_outlook_enabled', enabled)
+            for echo in echoes:
+                for operation in ('propose', 'rewrite'):
+                    with self.subTest(enabled=enabled, echo=echo, operation=operation):
+                        self.calls.clear()
+                        outlook = {**self.valid_outlook(), 'consequences': [echo]}
+                        if operation == 'propose':
+                            self.proposal(outlook)
+                            result = (await self.generate())['text']
+                        else:
+                            self.content = FACTS + '\n\n**ИИ-прогноз**\n' + ' '.join((echo, ASSUMPTION, UNCERTAINTY)) + '\n\n' + TAGS
+                            report = CycleReport(self.db, True, operation_type='rewrite')
+                            token = CURRENT_CYCLE.set(report)
+                            try:
+                                result = await llm.LLM(self.db).rewrite(self.posts, old)
+                                report.finish('completed')
+                            finally:
+                                CURRENT_CYCLE.reset(token)
+                            self.assertEqual(len(self.calls), 1)
+                            self.assertEqual(report.report['calls'], 1)
+                            self.assertEqual(report.report['cost_usd'], '0.001')
+                            self.assertNotIn(GENERIC_ECHO, self.calls[0]['messages'][1]['content'])
+                        self.assertEqual(result, FACTS + '\n\n' + TAGS)
+                        public = render_post(result, emoji=False)
+                        for output in (result, public.plain, public.html()):
+                            self.assertNotIn('ИИ-прогноз', output)
+                            self.assertNotIn('Редакционный сценарий', output)
+                            self.assertNotIn('обсуждение новости', output)
+                        self.assertTrue(public.plain.endswith(TAGS))
+
+    async def test_unusable_forecasts_keep_one_sdk_attempt_in_all_four_news_paths(self):
+        invalid_cases = ('missing', 'null', 'malformed', 'unsafe', 'overlong', 'no_evidence', 'empty_label')
+        old = FACTS + '\n\n**ИИ-прогноз**\n' + GENERIC_ECHO + '\n\n' + TAGS
+        pid = self.db.add_proposal('Manual unchanged', old, [])
+        source_posts = list(self.posts)
+        for enabled in ('1', '0'):
+            self.db.set('news_outlook_enabled', enabled)
+            for case in invalid_cases:
+                self.posts = [] if case == 'no_evidence' else source_posts
+                self.db.set('news_outlook_max_len', '200' if case == 'overlong' else '600')
+                outlook = self.valid_outlook()
+                if case in ('missing', 'null', 'empty_label'):
+                    outlook = None
+                elif case == 'malformed':
+                    outlook = {'consequences': [12], 'assumptions': [], 'uncertainty': None}
+                elif case == 'unsafe':
+                    outlook['consequences'] = ['Это может привести к росту на 99%.']
+                elif case == 'overlong':
+                    outlook['consequences'] = ['Это может привести к расширению тестирования' + ' сервиса' * 35 + '.']
+                for operation in ('propose', 'rewrite'):
+                    with self.subTest(enabled=enabled, case=case, operation=operation):
+                        self.calls.clear()
+                        if operation == 'propose':
+                            self.proposal(outlook)
+                            payload = json.loads(self.content)
+                            payload['proposals'][0]['text'] = old
+                            if case == 'missing':
+                                del payload['proposals'][0]['outlook']
+                            self.content = json.dumps(payload, ensure_ascii=False)
+                        else:
+                            prediction = ''
+                            if isinstance(outlook, dict) and case != 'malformed':
+                                prediction = ' '.join(outlook['consequences'] + [ASSUMPTION, UNCERTAINTY])
+                            elif case == 'malformed':
+                                prediction = 'Некорректный вывод.'
+                            block = '\n\n**ИИ-прогноз**\n' + prediction if case not in ('missing', 'null') else ''
+                            self.content = FACTS + block + '\n\n' + TAGS
+                        report = CycleReport(self.db, True, operation_type='rewrite')
+                        token = CURRENT_CYCLE.set(report)
+                        try:
+                            model = llm.LLM(self.db)
+                            if operation == 'propose':
+                                result = (await model.propose(self.posts, 1, []))[0]['text']
+                            else:
+                                result = await model.rewrite(self.posts, old)
+                            report.finish('completed')
+                        finally:
+                            CURRENT_CYCLE.reset(token)
+                        self.assertEqual(result, FACTS + '\n\n' + TAGS)
+                        self.assertEqual(len(self.calls), 1, 'Never repair an unusable forecast with another completion')
+                        self.assertEqual(report.report['calls'], 1)
+                        self.assertEqual(len(report.report['attempts']), 1)
+                        self.assertEqual(report.report['attempts'][0]['status'], 'completed')
+                        self.assertEqual(report.report['cost_usd'], '0.001')
+                        public = render_post(result, emoji=False)
+                        for output in (result, public.plain, public.html()):
+                            self.assertNotIn('ИИ-прогноз', output)
+                            self.assertNotIn('Редакционный сценарий', output)
+                        self.assertTrue(public.plain.endswith(TAGS))
+                        self.assertEqual(self.db.get_proposal(pid)['text'], old)
+        self.assertEqual(self.db.get('auto_publish'), '0')
+
+    async def test_grounded_city_service_consequence_is_retained_not_fabricated_locally(self):
+        facts = '**Наблюдение грунта**\n\nСпутниковые оценки указывают на проседание грунта и риск повреждения городской инфраструктуры.'
+        tags = '#Города #Инфраструктура #Мониторинг'
+        consequence = 'Городские службы могут пересмотреть приоритеты осмотра зданий и канализации.'
+        assumption = 'Условие — местные измерения подтвердят спутниковые оценки.'
+        uncertainty = 'Масштаб риска неизвестен; оценка может измениться.'
+        outlook = {'consequences': [consequence], 'assumptions': assumption, 'uncertainty': uncertainty}
+        self.posts = [{'channel': 'fixture', 'date': 1, 'text': 'Спутниковая оценка проседания грунта указывает на риск для инфраструктуры.'}]
+        self.content = json.dumps({'proposals': [{'title': 'Наблюдение грунта', 'text': facts + '\n\n' + tags,
+            'sources': [1], 'outlook': outlook}]}, ensure_ascii=False)
+        generated = (await self.generate())['text']
+        expected = facts + '\n\n🤖 **ИИ-прогноз**\n' + ' '.join((consequence, assumption, uncertainty)) + '\n\n' + tags
+        self.assertEqual(generated, expected)
+        self.calls.clear()
+        self.content = expected
+        rewritten = await llm.LLM(self.db).rewrite(self.posts, facts)
+        self.assertEqual(rewritten, expected)
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotIn('Редакционный сценарий', render_post(rewritten).plain)
+
+    async def test_specific_regulation_discussion_is_not_a_generic_editorial_echo(self):
+        consequence = 'Это может повлиять на обсуждение правил отчётности участниками пилотной группы.'
+        self.proposal({**self.valid_outlook(), 'consequences': [consequence]})
+        generated = await self.generate()
+        self.assertIn(consequence, generated['text'])
+        self.calls.clear()
+        self.content = generated['text']
+        rewritten = await llm.LLM(self.db).rewrite(self.posts, FACTS)
+        self.assertEqual(rewritten, generated['text'])
+        self.assertEqual(len(self.calls), 1)
 
     async def test_invalid_or_certain_outlook_is_rejected_not_repaired_or_regenerated(self):
         invalid = [None, '', [], {}, {'consequences': 'not a list'},
@@ -117,7 +249,7 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.clear()
                 self.proposal(outlook)
                 result = await self.generate()
-                self.assertEqual(result['text'], FACTS + '\n\n🤖 **ИИ-прогноз**\n' + FALLBACK + '\n\n' + TAGS)
+                self.assertEqual(result['text'], FACTS + '\n\n' + TAGS)
 
 
     async def test_generation_accepts_modal_consequence_without_literal_time_token(self):
@@ -126,7 +258,7 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
         result = await self.generate()
         self.assertEqual(result['text'], FACTS + '\n\n🤖 **ИИ-прогноз**\n' +
                          ' '.join((consequence, ASSUMPTION, UNCERTAINTY)) + '\n\n' + TAGS)
-        self.assertNotIn(FALLBACK, result['text'])
+        self.assertNotIn(GENERIC_ECHO, result['text'])
 
     async def test_rewrite_replaces_old_outlook_preserves_facts_and_tags_with_one_cost_attempt(self):
         old = FACTS + '\n\n🤖 **ИИ-прогноз**\nСтарый необоснованный вывод.\n\n' + TAGS
@@ -158,14 +290,14 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
                 self.content = json.dumps({'proposals': [{'title': 'Обновление сервиса', 'text': FACTS + '\n\n' + TAGS,
                     'sources': sources, 'outlook': self.valid_outlook()}]})
                 result = await self.generate()
-                self.assertIn(FALLBACK, result['text'])
+                self.assertEqual(result['text'], FACTS + '\n\n' + TAGS)
                 self.assertNotIn(CONSEQUENCE, result['text'])
 
-    async def test_rewrite_without_source_evidence_uses_fallback_not_old_inference(self):
+    async def test_rewrite_without_source_evidence_omits_outlook_not_old_inference(self):
         self.content = FACTS + '\n\n**ИИ-прогноз**\n' + ' '.join((CONSEQUENCE, ASSUMPTION, UNCERTAINTY)) + '\n\n' + TAGS
         self.posts = []
         text = await llm.LLM(self.db).rewrite(self.posts, FACTS)
-        self.assertEqual(text, FACTS + '\n\n🤖 **ИИ-прогноз**\n' + FALLBACK + '\n\n' + TAGS)
+        self.assertEqual(text, FACTS + '\n\n' + TAGS)
         self.assertEqual(len(self.calls), 1)
 
 
@@ -178,7 +310,7 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.clear()
                 self.content = FACTS + '\n\n**ИИ-прогноз**\n' + prediction + '\n\n' + TAGS
                 text = await llm.LLM(self.db).rewrite(self.posts, FACTS)
-                self.assertEqual(text, FACTS + '\n\n🤖 **ИИ-прогноз**\n' + FALLBACK + '\n\n' + TAGS)
+                self.assertEqual(text, FACTS + '\n\n' + TAGS)
                 self.assertEqual(len(self.calls), 1)
 
 
@@ -195,7 +327,7 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
         outlook['consequences'] = [CONSEQUENCE + ' Расширение гарантированно состоится.']
         self.proposal(outlook)
         result = await self.generate()
-        self.assertIn(FALLBACK, result['text'])
+        self.assertEqual(result['text'], FACTS + '\n\n' + TAGS)
         self.assertNotIn('гарантированно', result['text'])
 
 
@@ -211,7 +343,7 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rewritten, result['text'])
         self.assertEqual(len(self.calls), 1)
 
-    async def test_rewrite_missing_or_certain_prediction_has_emoji_off_fallback(self):
+    async def test_rewrite_missing_or_certain_prediction_keeps_emoji_off_facts_only(self):
         self.db.set('emoji', '0')
         for forecast in ('', '\n\n**ИИ-прогноз**\nНа следующей неделе всё точно улучшится.',
                          '\n\n**ИИ-прогноз**\nЕсли пилот успешен, в ближайшие дни рост может составить 99%. Условие — пилот. Срок неизвестен.'):
@@ -219,7 +351,7 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.clear()
                 self.content = FACTS + forecast + '\n\n' + TAGS
                 text = await llm.LLM(self.db).rewrite(self.posts, FACTS)
-                self.assertEqual(text, FACTS + '\n\n**ИИ-прогноз**\n' + FALLBACK + '\n\n' + TAGS)
+                self.assertEqual(text, FACTS + '\n\n' + TAGS)
                 self.assertEqual(len(self.calls), 1)
 
     async def test_json_mode_fallback_still_records_only_existing_two_attempts(self):
@@ -270,18 +402,18 @@ class OutlookTests(unittest.IsolatedAsyncioTestCase):
         self.content = json.dumps({'proposals': [{'title': 'ИИ-прогнозирование обсуждают', 'text': raw,
             'sources': [1], 'outlook': None}]})
         result = await self.generate()
-        self.assertEqual(result['text'], raw + '\n\n🤖 **ИИ-прогноз**\n' + FALLBACK)
+        self.assertEqual(result['text'], raw)
 
 
-    async def test_unbalanced_forecast_markup_cannot_break_fact_or_label_bold(self):
+    async def test_unbalanced_forecast_markup_is_omitted_without_breaking_fact_bold(self):
         outlook = self.valid_outlook()
         outlook['uncertainty'] = UNCERTAINTY + ' **незакрыто'
         self.proposal(outlook)
         result = await self.generate()
-        self.assertIn(FALLBACK, result['text'])
-        html = render_post(result['text']).html()
+        self.assertEqual(result['text'], FACTS + '\n\n' + TAGS)
+        html = render_post(result['text'], emoji=False).html()
         self.assertIn('<b>Обновление сервиса</b>', html)
-        self.assertIn('<b>ИИ-прогноз</b>', html)
+        self.assertNotIn('<b>ИИ-прогноз</b>', html)
 
 
     async def test_two_conditional_consequences_are_kept_without_inventing_topic_tags(self):

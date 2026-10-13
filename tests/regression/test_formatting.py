@@ -179,8 +179,7 @@ class PostRendering(unittest.IsolatedAsyncioTestCase):
         self.app.bot = RecordingTelegram(); self.db.set('admin_ids','123')
         self.db.set('llm_api_key','offline-key'); self.db.set('llm_model','offline-model')
         raw = '**📰 Provider heading**\n\nImportant **5%**.\n\nSecond fact.'
-        expected = raw + ('\n\n🤖 **ИИ-прогноз**\nРедакционный сценарий: на ближайшие дни/недели это может повлиять на обсуждение новости. '
-                          'При новых подтверждённых деталях оценку следует пересмотреть; последствия пока неизвестны.')
+        expected = raw
         calls, clients = [], []
         def factory(**kw):
             def respond(request):
@@ -199,7 +198,7 @@ class PostRendering(unittest.IsolatedAsyncioTestCase):
                 edited = self.app.bot.edited[-1][0][2]
                 self.assertIn('5%', [s[2] for s in bold_text(edited)[1]])
                 await self.app.publish(p['id'])
-                self.assertEqual([s[2] for s in bold_text(self.app.bot.sent[-1][1])[1]], ['📰 Provider heading', '5%', 'ИИ-прогноз'])
+                self.assertEqual([s[2] for s in bold_text(self.app.bot.sent[-1][1])[1]], ['📰 Provider heading', '5%'])
                 self.db.add_post('source', 7, 1, 'source facts', 'https://t.me/source/7')
                 breaking = self.app.modules['breaking']; breaking.save({'enabled':'1'})
                 await breaking.handle(self.db.posts_by_keys([('source',7)]))
@@ -207,7 +206,7 @@ class PostRendering(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(proposal['text'], expected)
                 self.assertIn('<b>5%</b>', self.app.bot.sent[-1][1])
                 await self.app.publish(proposal['id'])
-                self.assertEqual([s[2] for s in bold_text(self.app.bot.sent[-1][1])[1]], ['📰 Provider heading', '5%', 'ИИ-прогноз'])
+                self.assertEqual([s[2] for s in bold_text(self.app.bot.sent[-1][1])[1]], ['📰 Provider heading', '5%'])
                 self.assertEqual(len(calls), 2, 'No additional formatting LLM pass')
                 for call in calls:
                     final = call['messages'][0]['content'].split('Обязательное оформление')[-1]

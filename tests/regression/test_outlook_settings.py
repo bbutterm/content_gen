@@ -143,7 +143,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
         await other.save_settings({'news_outlook_enabled': True})
         self.proposal()
         reenabled = await llm.LLM(other.db).propose(self.posts, 1, [])
-        self.assertIn('Редакционный сценарий', reenabled[0]['text'])
+        self.assertEqual(reenabled[0]['text'], FACTS + '\n\n' + TAGS)
         self.assertNotIn('Недостаточно данных', reenabled[0]['text'])
         self.assertEqual(len(self.calls), 4)
 
@@ -194,15 +194,13 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.get('news_outlook_focus'), focus)
         self.assertEqual(self.calls, [])
 
-    async def test_missing_provider_outlook_uses_cautious_editorial_fallback_never_service_diagnosis(self):
+    async def test_missing_provider_outlook_keeps_facts_only_never_service_diagnosis(self):
         self.proposal()
         generated = (await llm.LLM(self.db).propose(self.posts, 1, []))[0]['text']
         self.assertNotIn('Недостаточно данных', generated)
-        self.assertIn('Редакционный сценарий', generated)
-        self.assertIn('может повлиять', generated)
-        self.assertIn('подтвержд', generated)
-        self.assertIn('неизвест', generated)
-        self.assertIn('ближайшие дни/недели', generated)
+        self.assertEqual(generated, FACTS + '\n\n' + TAGS)
+        self.assertNotIn('ИИ-прогноз', generated)
+        self.assertNotIn('Редакционный сценарий', generated)
         self.assertTrue(generated.startswith(FACTS))
         self.assertTrue(generated.endswith(TAGS))
         self.assertEqual(len(self.calls), 1)
@@ -227,18 +225,26 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rewritten, generated)
         self.assertEqual(len(self.calls), 2)
 
-    async def test_enabled_prompt_requires_minimal_grounded_modal_scenario_not_service_diagnosis(self):
+    async def test_enabled_prompt_allows_omission_instead_of_generic_editorial_scenario(self):
         for system in (prompts.build_propose(self.db.get, 1), prompts.build_rewrite(self.db.get)):
             self.assertNotIn('Недостаточно данных', system)
             self.assertIn('Это может повлиять на', system)
             self.assertIn('Это может привести к', system)
-            self.assertIn('каждой новости', system)
-            self.assertIn('не выдумывай', system)
-            self.assertIn('Редакционный сценарий', system)
-            self.assertIn('не модельный прогноз', system)
+            self.assertIn('не выдумывай', system.casefold())
+            self.assertIn('outlook: null', system)
+            self.assertIn('без блока и метки прогноза', system)
+            self.assertIn('конкретными участниками', system)
+            self.assertIn('отраслью', system)
+            self.assertIn('масштабом', system)
+            self.assertIn('Запрещены', system)
+            self.assertIn('«Редакционный сценарий»', system)
+            self.assertIn('«может повлиять на обсуждение новости»', system)
+            self.assertNotIn('допустим лишь общий возможный эффект', system)
+            self.assertNotIn('используй минимальный осторожный общий сценарий', system)
+            self.assertNotIn('не модельный прогноз', system)
             self.assertTrue(system.endswith(prompts.NEWS_OUTLOOK_RULES))
 
-    async def test_maxchars_rejects_whole_overlong_forecast_to_horizon_specific_editorial_scenario(self):
+    async def test_maxchars_omits_whole_overlong_forecast_for_every_horizon(self):
         labels = {'days_weeks': 'ближайшие дни/недели', 'days': 'ближайшие 1–3 дня',
                   'weeks': 'ближайшие 1–2 недели', 'month': 'ближайший месяц'}
         long = self.outlook(CONSEQUENCE + ' Осторожная оценка обсуждения.' * 5)
@@ -249,12 +255,9 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
             self.proposal(long)
             generated = (await llm.LLM(self.db).propose(self.posts, 1, []))[0]['text']
             self.assertNotIn(paragraph, generated)
-            self.assertIn('Редакционный сценарий', generated)
-            forecast = generated.split('**ИИ-прогноз**\n')[1].split('\n\n')[0]
-            self.assertLessEqual(len(forecast), 200)
-            self.assertIn(label, forecast)
-            self.assertIn('неизвест', forecast)
-            self.assertIn('подтвержд', forecast)
+            self.assertEqual(generated, FACTS + '\n\n' + TAGS)
+            self.assertNotIn('ИИ-прогноз', generated)
+            self.assertNotIn('Редакционный сценарий', generated)
             self.assertTrue(generated.startswith(FACTS))
             self.assertTrue(generated.endswith(TAGS))
             self.content = FACTS + '\n\n**ИИ-прогноз**\n' + paragraph + '\n\n' + TAGS
@@ -283,7 +286,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.clear()
                 self.proposal(outlook)
                 result = (await llm.LLM(self.db).propose(self.posts, 1, []))[0]['text']
-                self.assertIn('Редакционный сценарий', result)
+                self.assertEqual(result, FACTS + '\n\n' + TAGS)
                 self.assertNotIn('Недостаточно данных', result)
                 self.assertNotIn('99', result)
                 self.assertNotIn('гарантированно', result)
@@ -303,7 +306,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.clear()
                 self.content = FACTS + '\n\n**ИИ-прогноз**\n' + forecast + '\n\n' + TAGS
                 result = await llm.LLM(self.db).rewrite(self.posts, FACTS)
-                self.assertIn('Редакционный сценарий', result)
+                self.assertEqual(result, FACTS + '\n\n' + TAGS)
                 self.assertNotIn('Недостаточно данных', result)
                 self.assertTrue(result.startswith(FACTS))
                 self.assertTrue(result.endswith(TAGS))
@@ -328,7 +331,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Недостаточно данных', result)
         self.assertTrue(result.startswith(FACTS))
         self.assertTrue(result.endswith(TAGS))
-        self.assertIn('Редакционный сценарий', result)
+        self.assertEqual(result, FACTS + '\n\n' + TAGS)
         self.content = FACTS + '\n\n' + diagnosis + '\n\n' + TAGS
         self.assertEqual(await llm.LLM(self.db).rewrite(self.posts, FACTS), result)
         only = '**ИИ-прогноз**\n' + ' '.join((CONSEQUENCE, ASSUMPTION, UNCERTAINTY)) + '\n\n' + TAGS
@@ -357,7 +360,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn(diagnosis, result)
                         self.assertTrue(result.startswith(facts))
                         self.assertTrue(result.endswith(TAGS))
-                        self.assertEqual('**ИИ-прогноз**' in result, enabled)
+                        self.assertNotIn('**ИИ-прогноз**', result)
                     self.assertEqual(self.db.get_proposal(pid)['text'], raw)
                     self.assertEqual(len(self.calls), 2)
 
@@ -392,11 +395,11 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(result.startswith(facts))
                         self.assertTrue(result.endswith(TAGS))
                         self.assertTrue(public.plain.endswith(TAGS))
-                        self.assertEqual('**ИИ-прогноз**' in result, enabled)
-                        self.assertEqual('Редакционный сценарий' in public.plain, enabled)
+                        self.assertNotIn('**ИИ-прогноз**', result)
+                        self.assertNotIn('Редакционный сценарий', public.plain)
 
     def test_balanced_bold_diagnostic_variants_match_only_whole_visible_paragraphs(self):
-        from news_outlook import assemble_outlook, editorial_fallback
+        from news_outlook import assemble_outlook
         from post_format import render_post
         phrases = (
             'Недостаточно данных',
@@ -423,7 +426,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
                         variants.add(phrase[:start] + '**' + phrase[start:end] + '**' + phrase[end:])
             variants.add(' '.join('**' + word + '**' for word in phrase.split()))
         for enabled in (True, False):
-            expected = FACTS + ('\n\n**ИИ-прогноз**\n' + editorial_fallback() if enabled else '') + '\n\n' + TAGS
+            expected = FACTS + '\n\n' + TAGS
             for diagnosis in sorted(variants):
                 with self.subTest(enabled=enabled, diagnosis=diagnosis):
                     raw = FACTS + '\n\n' + diagnosis + '\n\n' + TAGS
@@ -435,7 +438,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [], 'Normalization must never request a completion')
 
     def test_sourced_facts_and_malformed_bold_are_not_substring_filtered(self):
-        from news_outlook import assemble_outlook, editorial_fallback
+        from news_outlook import assemble_outlook
         from post_format import render_post
         preserved = (
             'Эксперты сообщили: недостаточно данных для прогноза урожая.',
@@ -455,8 +458,7 @@ class OutlookSettingsTests(unittest.IsolatedAsyncioTestCase):
             for paragraph in preserved:
                 with self.subTest(enabled=enabled, paragraph=paragraph):
                     raw = FACTS + '\n\n' + paragraph + '\n\n' + TAGS
-                    expected = FACTS + '\n\n' + paragraph + (
-                        '\n\n**ИИ-прогноз**\n' + editorial_fallback() if enabled else '') + '\n\n' + TAGS
+                    expected = raw
                     self.assertEqual(assemble_outlook(raw, None, enabled=enabled, emoji=False), expected)
                     pid = self.db.add_proposal('Manual preserved', raw, [])
                     before = self.db._raw.total_changes
