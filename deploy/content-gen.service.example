@@ -1,0 +1,46 @@
+# Example only: install the code/venv and create contentgen first.
+# Copy to /etc/systemd/system/content-gen.service after local review.
+[Unit]
+Description=content_gen Telegram editorial system
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=contentgen
+Group=contentgen
+WorkingDirectory=/opt/newsbot
+EnvironmentFile=/etc/content-gen/panel.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=DB_PATH=/var/lib/content-gen/newsbot.db
+Environment=PANEL_HOST=127.0.0.1
+Environment=PANEL_PORT=8080
+UnsetEnvironment=PYTHONPATH PYTHONHOME
+ExecStart=/opt/newsbot/.venv/bin/python -B /opt/newsbot/main.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+StateDirectory=content-gen
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/newsbot
+ReadWritePaths=/var/lib/content-gen
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

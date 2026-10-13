@@ -1,0 +1,33 @@
+(async () => {
+ const passed=[];
+ const assert=(ok,msg)=>{if(!ok)throw new Error(msg);passed.push(msg)};
+ const wait=async fn=>{for(let n=0;n<250;n++){if(fn())return;await new Promise(r=>setTimeout(r,20))}throw new Error('UI timeout')};
+ await wait(()=>document.querySelector('#app:not(.hidden)'));
+ document.querySelector('[data-tab="proposals"]').click();
+ await wait(()=>document.querySelector('#propList [data-text="1"]'));
+ let preview=document.querySelector('.proposal-preview');
+ assert(!!preview,'safe rendered preview exists beside raw editor');
+ assert([...preview.querySelectorAll('b')].map(x=>x.textContent).join('|')==='📰 Fixture headline|Important','real bold headline and important span');
+ assert(preview.textContent.includes('📰'),'neutral emoji fallback visible');
+ assert(!preview.textContent.includes('**'),'no literal valid bold markers in rendered preview');
+ assert(!preview.querySelector('script') && !window.pwned,'model script never executes');
+ let editor=document.querySelector('[data-text="1"]');
+ assert(editor.value==='**Fixture headline**\n\n**Important** & <script>window.pwned=1</script>.\n\nSecond fact.','editable raw model text retained');
+ assert(document.querySelector('.format-hint').textContent.includes('**текст**'),'bold syntax explained near editor');
+ editor.value='**Owner headline**\n\n**Owner important** & <b>literal</b>.\n\nAnother fact.';
+ document.querySelector('[data-save-text="1"]').click();
+ await wait(()=>document.querySelector('.proposal-preview')?.textContent.includes('Owner headline'));
+ const saved=(await(await fetch('/api/proposals')).json())[0];
+ editor=document.querySelector('[data-text="1"]');
+ assert(saved.text===editor.value && saved.text.includes('**Owner important**'),'save preserves raw edit in DB and editor');
+ preview=document.querySelector('.proposal-preview');
+ assert([...preview.querySelectorAll('b')].some(x=>x.textContent==='Owner important'),'save refreshes rendered preview');
+ assert(preview.textContent.includes('<b>literal</b>'),'raw model HTML remains literal characters');
+ document.querySelector('[data-btn="rw:1"]').click();
+ await wait(()=>document.querySelector('.proposal-preview')?.textContent.includes('точный и дружелюбный автор'));
+ assert(!document.querySelector('[data-text="1"]').value.includes('Owner headline'),'rewrite refreshes editor and preview from server');
+ document.querySelector('#workspaceSelect').value='2'; document.querySelector('#workspaceSelect').dispatchEvent(new Event('change'));
+ await wait(()=>document.querySelector('#workspaceName').textContent==='Sport');
+ assert(!document.querySelector('#propList [data-text="1"]'),'workspace switch does not show other workspace draft');
+ return {passed};
+})()

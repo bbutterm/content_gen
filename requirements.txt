@@ -1,0 +1,4 @@
+# Exact dependency snapshots shipped with the application.
+-r requirements.lock.txt
+-r requirements-qr.txt
+-r requirements-motion.txt

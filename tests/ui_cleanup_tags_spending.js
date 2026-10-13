@@ -1,0 +1,31 @@
+(async () => {
+ const passed=[];
+ const assert=(ok,msg)=>{if(!ok)throw new Error(msg);passed.push(msg)};
+ const wait=async fn=>{for(let n=0;n<250;n++){if(fn())return;await new Promise(r=>setTimeout(r,20))}throw new Error('UI timeout')};
+ await wait(()=>document.querySelector('#app:not(.hidden)'));
+ const tags=document.querySelector('#sec-post [data-key="publication_hashtags"]');
+ const enabled=document.querySelector('#sec-post [data-key="publication_hashtags_enabled"]');
+ assert(!!tags && !!enabled,'workspace Publication hashtag controls exist');
+ assert(enabled.checked,'hashtags enabled by default');
+ assert(document.querySelector('#publicationHashtagsHint').textContent.includes('#Основная'),'automatic hashtag fallback visible');
+ const select=document.querySelector('#workspaceSelect');
+ assert(select.options[0].textContent.includes('0.000000000000000003 USD'),'first workspace exact tiny recorded spending');
+ assert(select.options[1].textContent.includes('3.75 USD'),'other workspace separate recorded spending');
+ assert(select.options[1].textContent.includes('1 неполн.'),'workspace unknown count visible');
+ assert(document.querySelector('#recordedSpending').textContent.includes('0.000000000000000003 USD'),'selected workspace Overview exact total');
+ assert(document.querySelector('#recordedSpending').textContent.includes('Не полный'),'billing coverage caveat visible');
+ select.value='2';select.dispatchEvent(new Event('change'));
+ await wait(()=>document.querySelector('#workspaceName').textContent==='Sport');
+ assert(document.querySelector('#publicationHashtagsHint').textContent.includes('#Sport'),'workspace switch updates automatic hashtag');
+ assert(document.querySelector('#recordedSpending').textContent.includes('3.75 USD'),'workspace switch updates Overview spending');
+ document.querySelector('[data-tab="publish"]').click();
+ tags.value='#АйТи, #Технологии';enabled.checked=false;
+ const save=document.querySelector('[data-save="sec-post"]');save.click();
+ await wait(()=>!save.disabled);
+ const st=await(await fetch('/api/state',{headers:{'X-Workspace-ID':'2'}})).json();
+ assert(st.settings.publication_hashtags==='#АйТи #Технологии' && st.settings.publication_hashtags_enabled==='0','workspace Save persists editable hashtags and disable');
+ select.value='1';select.dispatchEvent(new Event('change'));
+ await wait(()=>document.querySelector('#workspaceName').textContent==='Основная');
+ assert(tags.value==='' && enabled.checked,'other workspace publication settings preserved');
+ return {passed};
+})()
